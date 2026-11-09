@@ -1,0 +1,35 @@
+name: BlockAnimatePlugin
+description: Animates block structures frame by frame.
+version: '${version}'
+
+main: net.dvmn2.blockanimateplugin.BlockAnimatePlugin
+api-version: '1.21'
+load: POSTWORLD
+
+authors: [ DVMN2 ]
+
+permissions:
+  blockanimate.use:
+    description: Use /blockanimate, list and inspect animations
+    default: op
+  blockanimate.select:
+    description: Use the selection wand and /blockanimate pos1, pos2
+    default: op
+  blockanimate.edit:
+    description: Create and delete animations, add, replace and remove frames
+    default: op
+  blockanimate.play:
+    description: Play and stop animations, show single frames
+    default: op
+  blockanimate.reload:
+    description: Use /blockanimate reload
+    default: op
+  blockanimate.admin:
+    description: All administrative Block Animate permissions
+    default: op
+    children:
+      blockanimate.use: true
+      blockanimate.select: true
+      blockanimate.edit: true
+      blockanimate.play: true
+      blockanimate.reload: true

@@ -1,0 +1,30 @@
+settings:
+  # Plugin message language: "ru", "en" or "auto".
+  # "auto" uses the player's client locale; the console always gets English.
+  language: auto
+
+  # Maximum number of blocks in one animation region (1..1000000).
+  # Every frame stores one entry per block, so memory use grows with volume * frames.
+  # Default: 100000
+  max-volume-blocks: 100000
+
+  # Maximum number of frames per animation (1..1000).
+  # Default: 200
+  max-frames: 200
+
+  # Maximum number of animations that can play at the same time (1..64).
+  # Default: 8
+  max-running-animations: 8
+
+  # Maximum number of blocks one animation may change per tick (64..100000).
+  # Frames with more changed blocks are applied over several ticks.
+  # Default: 4096
+  max-blocks-per-tick: 4096
+
+  # Whether placed blocks trigger physics (gravity, fluid flow, redstone updates): true or false.
+  # Default: false
+  apply-physics: false
+
+  # How often changed animations are written to disk, in seconds (5..3600).
+  # Default: 30
+  autosave-seconds: 30
