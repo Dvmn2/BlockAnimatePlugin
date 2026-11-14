@@ -16,10 +16,10 @@ permissions:
     description: Use the selection wand and /blockanimate pos1, pos2
     default: op
   blockanimate.edit:
-    description: Create and delete animations, add, replace and remove frames
+    description: Create, delete, move and copy animations, add, replace and remove frames
     default: op
   blockanimate.play:
-    description: Play and stop animations, show single frames
+    description: Play and stop animations, show single frames, move or copy blocks together with an animation
     default: op
   blockanimate.reload:
     description: Use /blockanimate reload

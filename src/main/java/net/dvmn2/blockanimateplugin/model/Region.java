@@ -50,6 +50,30 @@ public record Region(int minX, int minY, int minZ, int maxX, int maxY, int maxZ)
         return product >= Long.MAX_VALUE ? Long.MAX_VALUE : (long) product;
     }
 
+    /**
+     * Returns the same box shifted by the given offsets, in blocks.
+     *
+     * <p>The caller keeps the offsets small enough that the coordinates do not overflow.
+     */
+    public Region shifted(int dx, int dy, int dz) {
+        return new Region(minX + dx, minY + dy, minZ + dz, maxX + dx, maxY + dy, maxZ + dz);
+    }
+
+    /** Returns the same box with its minimum corner moved to the given block. */
+    public Region movedTo(int newMinX, int newMinY, int newMinZ) {
+        return shifted(newMinX - minX, newMinY - minY, newMinZ - minZ);
+    }
+
+    /** Returns true if the block lies inside the box. */
+    public boolean contains(int x, int y, int z) {
+        return x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ;
+    }
+
+    /** Returns true if the box has exactly the same dimensions as the other one. */
+    public boolean hasSameSize(Region other) {
+        return sizeX() == other.sizeX() && sizeY() == other.sizeY() && sizeZ() == other.sizeZ();
+    }
+
     /** Returns true if the two boxes share at least one block. */
     public boolean overlaps(Region other) {
         return minX <= other.maxX && maxX >= other.minX

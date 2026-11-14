@@ -4,6 +4,7 @@ import net.dvmn2.blockanimateplugin.model.Animation;
 import net.dvmn2.blockanimateplugin.model.PlayDirection;
 import net.dvmn2.blockanimateplugin.model.PlayMode;
 import net.dvmn2.blockanimateplugin.model.PlayResult;
+import net.dvmn2.blockanimateplugin.model.Region;
 import net.dvmn2.blockanimateplugin.util.ChunkGuard;
 import org.bukkit.World;
 import org.bukkit.plugin.Plugin;
@@ -12,6 +13,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
@@ -52,6 +54,17 @@ public final class PlaybackManager {
 
     public boolean isRunning(String name) {
         return sessions.containsKey(name);
+    }
+
+    /** Returns true if a running animation of the world shares at least one block with the region. */
+    public boolean isAreaRunning(UUID worldId, Region region) {
+        for (PlaybackSession session : sessions.values()) {
+            Animation other = session.getAnimation();
+            if (other.getWorldId().equals(worldId) && other.getRegion().overlaps(region)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Starts playback. The animation MUST NOT be capturing; the caller checks that. */

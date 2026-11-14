@@ -11,6 +11,9 @@ import java.util.regex.Pattern;
  *
  * <p>Main thread only. Use {@link #snapshot()} to hand the data to another thread.
  *
+ * <p>The region can be moved to another place of the same size, see {@link #moveRegion(Region)}.
+ * Frames are immutable, so {@link #copy} shares them between animations.
+ *
  * <p>{@code displayedFrame} tracks which frame the world is believed to show, so that switching frames
  * only touches blocks that differ. It is {@link #UNKNOWN_FRAME} when the state is not known.
  */
@@ -24,7 +27,7 @@ public final class Animation {
     private final String name;
     private final UUID worldId;
     private final String worldName;
-    private final Region region;
+    private Region region;
     private final List<Frame> frames = new ArrayList<>();
     private int displayedFrame = UNKNOWN_FRAME;
 
@@ -63,6 +66,42 @@ public final class Animation {
 
     public Region getRegion() {
         return region;
+    }
+
+    /**
+     * Points the animation at another region of the same size without touching the world.
+     * The world around the new region is unknown, so the displayed frame is forgotten.
+     *
+     * @throws IllegalArgumentException if the size differs from the current region
+     */
+    public void moveRegion(Region target) {
+        requireSameSize(target);
+        region = target;
+        displayedFrame = UNKNOWN_FRAME;
+    }
+
+    /**
+     * Points the animation at another region of the same size after the blocks were moved there too,
+     * so the displayed frame stays valid.
+     *
+     * @throws IllegalArgumentException if the size differs from the current region
+     */
+    public void moveRegionWithBlocks(Region target) {
+        requireSameSize(target);
+        region = target;
+    }
+
+    /**
+     * Creates an animation with the same frames in another place. The frames are shared, not duplicated.
+     * The copy has no known displayed frame.
+     *
+     * @throws IllegalArgumentException if the size differs from the current region
+     */
+    public Animation copy(String newName, UUID newWorldId, String newWorldName, Region newRegion) {
+        requireSameSize(newRegion);
+        Animation result = new Animation(newName, newWorldId, newWorldName, newRegion);
+        result.frames.addAll(frames);
+        return result;
     }
 
     public int getFrameCount() {
@@ -104,5 +143,11 @@ public final class Animation {
 
     public AnimationSnapshot snapshot() {
         return new AnimationSnapshot(name, worldId, worldName, region, frames);
+    }
+
+    private void requireSameSize(Region other) {
+        if (!region.hasSameSize(other)) {
+            throw new IllegalArgumentException("The region size must not change");
+        }
     }
 }

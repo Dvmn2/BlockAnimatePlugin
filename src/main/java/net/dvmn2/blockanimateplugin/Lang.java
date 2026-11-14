@@ -48,6 +48,7 @@ public final class Lang {
         STATE_IDLE,
         STATE_PLAYING,
         STATE_CAPTURING,
+        STATE_MOVING,
         FRAME_CAPTURING,
         FRAME_ADDED,
         FRAME_REPLACED,
@@ -58,6 +59,13 @@ public final class Lang {
         WORLD_UNAVAILABLE,
         CHUNKS_NOT_LOADED,
         TOO_MANY_STATES,
+        REGION_OUT_OF_WORLD,
+        MOVE_STARTED,
+        MOVE_REGION_DONE,
+        MOVE_BLOCKS_DONE,
+        MOVE_NO_CHANGE,
+        MOVE_OVERLAP,
+        COPY_SUCCESS,
         SHOW_STARTED,
         PLAY_STARTED,
         PLAY_NO_FRAMES,
@@ -172,6 +180,9 @@ public final class Lang {
         put(Key.STATE_CAPTURING,
                 "<yellow>снимает кадр",
                 "<yellow>capturing");
+        put(Key.STATE_MOVING,
+                "<yellow>переносит блоки",
+                "<yellow>moving blocks");
 
         put(Key.FRAME_CAPTURING,
                 "<gray>Снимаю кадр...",
@@ -192,8 +203,8 @@ public final class Lang {
                 "<red>Достигнут лимит кадров (<limit>).",
                 "<red>The frame limit is reached (<limit>).");
         put(Key.BUSY,
-                "<red>Анимация <yellow><name></yellow> занята (воспроизводится или снимает кадр).",
-                "<red>Animation <yellow><name></yellow> is busy (playing or capturing a frame).");
+                "<red>Анимация <yellow><name></yellow> занята (воспроизводится, снимает кадр или переносится).",
+                "<red>Animation <yellow><name></yellow> is busy (playing, capturing a frame or moving).");
         put(Key.WORLD_UNAVAILABLE,
                 "<red>Мир этой анимации не загружен.",
                 "<red>The world of this animation is not loaded.");
@@ -204,6 +215,33 @@ public final class Lang {
                 "<red>В области слишком много разных состояний блоков.",
                 "<red>The region contains too many different block states.");
 
+        put(Key.REGION_OUT_OF_WORLD,
+                "<red>Область вышла бы за пределы мира (по высоте или дальше 30 000 000 блоков по X и Z).",
+                "<red>The region would leave the world limits (height range, or beyond 30,000,000 blocks in X and Z).");
+        put(Key.MOVE_STARTED,
+                "<gray>Переношу блоки...",
+                "<gray>Moving the blocks...");
+        put(Key.MOVE_REGION_DONE,
+                "<green>Область анимации <yellow><name></yellow> сдвинута на <yellow><dx>, <dy>, <dz></yellow>. "
+                        + "Блоки в мире не менялись.",
+                "<green>The region of <yellow><name></yellow> was moved by <yellow><dx>, <dy>, <dz></yellow>. "
+                        + "No blocks were changed.");
+        put(Key.MOVE_BLOCKS_DONE,
+                "<green>Анимация <yellow><name></yellow> перенесена на <yellow><dx>, <dy>, <dz></yellow> "
+                        + "вместе с блоками.",
+                "<green>Animation <yellow><name></yellow> was moved by <yellow><dx>, <dy>, <dz></yellow> "
+                        + "together with its blocks.");
+        put(Key.MOVE_NO_CHANGE,
+                "<red>Сдвиг равен нулю: область останется на месте.",
+                "<red>The offset is zero: the region would stay where it is.");
+        put(Key.MOVE_OVERLAP,
+                "<red>Область переноса пересекается с воспроизводимой анимацией или другим переносом.",
+                "<red>The affected area overlaps a running animation or another move.");
+        put(Key.COPY_SUCCESS,
+                "<green>Анимация <yellow><source></yellow> скопирована в <yellow><name></yellow> "
+                        + "(кадров: <frames>, начало области: <yellow><x>, <y>, <z></yellow>).",
+                "<green>Animation <yellow><source></yellow> copied to <yellow><name></yellow> "
+                        + "(<frames> frame(s), region starts at <yellow><x>, <y>, <z></yellow>).");
         put(Key.SHOW_STARTED,
                 "<green>Показываю кадр <index> анимации <yellow><name></yellow>.",
                 "<green>Showing frame <index> of <yellow><name></yellow>.");

@@ -3,9 +3,12 @@ package net.dvmn2.blockanimateplugin;
 import net.dvmn2.blockanimateplugin.model.Animation;
 import net.dvmn2.blockanimateplugin.model.AnimationSnapshot;
 import net.dvmn2.blockanimateplugin.model.AnimationState;
+import net.dvmn2.blockanimateplugin.model.CopyResult;
 import net.dvmn2.blockanimateplugin.model.CreateResult;
 import net.dvmn2.blockanimateplugin.model.Frame;
 import net.dvmn2.blockanimateplugin.model.FrameResult;
+import net.dvmn2.blockanimateplugin.model.MoveMode;
+import net.dvmn2.blockanimateplugin.model.MoveResult;
 import net.dvmn2.blockanimateplugin.model.PlayDirection;
 import net.dvmn2.blockanimateplugin.model.PlayMode;
 import net.dvmn2.blockanimateplugin.model.PlayResult;
@@ -26,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -40,6 +44,9 @@ import java.util.logging.Logger;
  * <p>Main thread only. Disk writes happen on a dedicated single-thread executor from immutable snapshots;
  * changed animations are flagged dirty and written periodically and once more, synchronously, on shutdown.
  *
+ * <p>Moving and copying animations also go through this class: a move may rewrite blocks of the world in
+ * slices (see {@link RelocationManager}), a copy only creates data and shares the immutable frames.
+ *
  * <p>Lifecycle: {@link #load()}, {@link #start()}, {@link #onSettingsReloaded()}, {@link #shutdown()}.
  */
 public final class AnimationManager {
@@ -49,6 +56,9 @@ public final class AnimationManager {
 
     private static final long IO_SHUTDOWN_WAIT_SECONDS = 10L;
 
+    /** Largest absolute X or Z coordinate the game allows for a block, blocks. */
+    private static final int MAX_HORIZONTAL_BLOCKS = 30_000_000;
+
     private final Plugin plugin;
     private final Logger log;
     private final Supplier<BlockAnimateSettings> settings;
@@ -56,6 +66,7 @@ public final class AnimationManager {
     private final BlockDataFactory blocks;
     private final PlaybackManager playback;
     private final CaptureManager capture;
+    private final RelocationManager relocation;
     private final Map<String, Animation> animations = new TreeMap<>();
     private final Set<String> dirty = new HashSet<>();
     private final ExecutorService io = Executors.newSingleThreadExecutor(runnable -> {
@@ -67,7 +78,8 @@ public final class AnimationManager {
     private BukkitTask autosaveTask;
 
     public AnimationManager(Plugin plugin, Supplier<BlockAnimateSettings> settings, AnimationStore store,
-                            BlockDataFactory blocks, PlaybackManager playback, CaptureManager capture) {
+                            BlockDataFactory blocks, PlaybackManager playback, CaptureManager capture,
+                            RelocationManager relocation) {
         this.plugin = plugin;
         this.log = plugin.getLogger();
         this.settings = settings;
@@ -75,6 +87,7 @@ public final class AnimationManager {
         this.blocks = blocks;
         this.playback = playback;
         this.capture = capture;
+        this.relocation = relocation;
     }
 
     // ---------- Lifecycle ----------
@@ -91,6 +104,7 @@ public final class AnimationManager {
     public void start() {
         capture.start();
         playback.start();
+        relocation.start();
         scheduleAutosave();
     }
 
@@ -102,6 +116,7 @@ public final class AnimationManager {
         }
         capture.shutdown();
         playback.shutdown();
+        relocation.shutdown();
         io.shutdown();
         try {
             if (!io.awaitTermination(IO_SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS)) {
@@ -140,6 +155,9 @@ public final class AnimationManager {
         if (playback.isRunning(animation.getName())) {
             return AnimationState.PLAYING;
         }
+        if (relocation.isRelocating(animation.getName())) {
+            return AnimationState.MOVING;
+        }
         if (capture.isCapturing(animation.getName())) {
             return AnimationState.CAPTURING;
         }
@@ -172,6 +190,7 @@ public final class AnimationManager {
         String name = animation.getName();
         playback.stop(name);
         capture.cancel(name);
+        relocation.cancel(name);
         animations.remove(name);
         dirty.remove(name);
         io.execute(() -> {
@@ -246,6 +265,82 @@ public final class AnimationManager {
         return FrameResult.REMOVED;
     }
 
+    // ---------- Moving and copying ----------
+
+    /**
+     * Moves the region of an animation by an offset, optionally together with its blocks.
+     *
+     * <p>The offsets MUST be small enough that the coordinates do not overflow {@code int}; the command
+     * restricts them. Frames are never changed.
+     *
+     * @param mode   {@link MoveMode#REGION_ONLY} changes only the region and finishes immediately with
+     *               {@link MoveResult#MOVED}; the other modes also move the blocks of the world
+     * @param onDone called on the main thread with the final outcome if this method returns STARTED
+     */
+    public MoveResult move(String rawName, int dx, int dy, int dz, MoveMode mode, Consumer<MoveResult> onDone) {
+        Animation animation = find(rawName);
+        if (animation == null) {
+            return MoveResult.NOT_FOUND;
+        }
+        if (dx == 0 && dy == 0 && dz == 0) {
+            return MoveResult.NO_CHANGE;
+        }
+        if (isBusy(animation)) {
+            return MoveResult.BUSY;
+        }
+        World world = plugin.getServer().getWorld(animation.getWorldId());
+        if (world == null) {
+            return MoveResult.WORLD_UNAVAILABLE;
+        }
+        Region from = animation.getRegion();
+        Region to = from.shifted(dx, dy, dz);
+        if (!fits(world, to)) {
+            return MoveResult.INVALID_POSITION;
+        }
+        if (mode == MoveMode.REGION_ONLY) {
+            animation.moveRegion(to);
+            markDirty(animation.getName());
+            return MoveResult.MOVED;
+        }
+        MoveResult rejected = checkMovable(world, from, to, mode);
+        if (rejected != null) {
+            return rejected;
+        }
+        boolean started = relocation.begin(animation, to, mode,
+                outcome -> completeMove(animation, to, onDone, outcome));
+        return started ? MoveResult.STARTED : MoveResult.BUSY;
+    }
+
+    /**
+     * Creates a new animation with the frames of an existing one, placed at another position.
+     * The world is not touched. The source may be in any state.
+     *
+     * @param world the world of the new animation
+     * @param x     X of the minimum corner of the new region
+     * @param y     Y of the minimum corner of the new region
+     * @param z     Z of the minimum corner of the new region
+     */
+    public CopyResult copy(String rawSource, String rawName, World world, int x, int y, int z) {
+        Animation source = find(rawSource);
+        if (source == null) {
+            return CopyResult.NOT_FOUND;
+        }
+        String name = Animation.normalizeName(rawName);
+        if (!Animation.NAME_PATTERN.matcher(name).matches()) {
+            return CopyResult.INVALID_NAME;
+        }
+        if (animations.containsKey(name)) {
+            return CopyResult.EXISTS;
+        }
+        Region target = source.getRegion().movedTo(x, y, z);
+        if (!fits(world, target)) {
+            return CopyResult.INVALID_POSITION;
+        }
+        animations.put(name, source.copy(name, world.getUID(), world.getName(), target));
+        markDirty(name);
+        return CopyResult.SUCCESS;
+    }
+
     // ---------- Playback ----------
 
     /** Starts playback; the delay is in ticks, counted from the end of each frame change. */
@@ -254,8 +349,11 @@ public final class AnimationManager {
         if (animation == null) {
             return PlayResult.NOT_FOUND;
         }
-        if (capture.isCapturing(animation.getName())) {
+        if (isModifying(animation)) {
             return PlayResult.BUSY;
+        }
+        if (relocation.isAreaBusy(animation.getWorldId(), animation.getRegion())) {
+            return PlayResult.OVERLAP;
         }
         return playback.play(animation, direction, mode, delayTicks);
     }
@@ -266,8 +364,11 @@ public final class AnimationManager {
         if (animation == null) {
             return PlayResult.NOT_FOUND;
         }
-        if (capture.isCapturing(animation.getName())) {
+        if (isModifying(animation)) {
             return PlayResult.BUSY;
+        }
+        if (relocation.isAreaBusy(animation.getWorldId(), animation.getRegion())) {
+            return PlayResult.OVERLAP;
         }
         return playback.showFrame(animation, index);
     }
@@ -288,7 +389,50 @@ public final class AnimationManager {
     // ---------- Internals ----------
 
     private boolean isBusy(Animation animation) {
-        return playback.isRunning(animation.getName()) || capture.isCapturing(animation.getName());
+        return playback.isRunning(animation.getName()) || isModifying(animation);
+    }
+
+    /** Returns true while the animation is capturing a frame or moving its blocks. */
+    private boolean isModifying(Animation animation) {
+        return capture.isCapturing(animation.getName()) || relocation.isRelocating(animation.getName());
+    }
+
+    /** Returns true if the region lies inside the height range and the horizontal limits of the world. */
+    private static boolean fits(World world, Region region) {
+        return region.minY() >= world.getMinHeight() && region.maxY() < world.getMaxHeight()
+                && Math.abs((long) region.minX()) <= MAX_HORIZONTAL_BLOCKS
+                && Math.abs((long) region.maxX()) <= MAX_HORIZONTAL_BLOCKS
+                && Math.abs((long) region.minZ()) <= MAX_HORIZONTAL_BLOCKS
+                && Math.abs((long) region.maxZ()) <= MAX_HORIZONTAL_BLOCKS;
+    }
+
+    /** Checks that blocks may be written now; returns the reason if not, otherwise null. */
+    @Nullable
+    private MoveResult checkMovable(World world, Region from, Region to, MoveMode mode) {
+        UUID worldId = world.getUID();
+        // The old region is written only when it is cleared; copying merely reads it.
+        boolean clearsOld = mode == MoveMode.REMOVE;
+        boolean newBusy = playback.isAreaRunning(worldId, to) || relocation.isAreaBusy(worldId, to);
+        boolean oldBusy = clearsOld
+                && (playback.isAreaRunning(worldId, from) || relocation.isAreaBusy(worldId, from));
+        if (newBusy || oldBusy) {
+            return MoveResult.OVERLAP;
+        }
+        if (!ChunkGuard.areLoaded(world, from) || !ChunkGuard.areLoaded(world, to)) {
+            return MoveResult.CHUNKS_NOT_LOADED;
+        }
+        return null;
+    }
+
+    private void completeMove(Animation animation, Region to, Consumer<MoveResult> onDone, MoveResult outcome) {
+        if (outcome == MoveResult.COMPLETED) {
+            animation.moveRegionWithBlocks(to);
+            markDirty(animation.getName());
+        } else {
+            // The old region may have been cleared partly, so nothing is known about it any more.
+            animation.setDisplayedFrame(Animation.UNKNOWN_FRAME);
+        }
+        onDone.accept(outcome);
     }
 
     private FrameResult startCapture(Animation animation, boolean replace, int index,

@@ -24,9 +24,12 @@ import net.dvmn2.blockanimateplugin.Permissions;
 import net.dvmn2.blockanimateplugin.SelectionManager;
 import net.dvmn2.blockanimateplugin.WandFactory;
 import net.dvmn2.blockanimateplugin.model.Animation;
+import net.dvmn2.blockanimateplugin.model.CopyResult;
 import net.dvmn2.blockanimateplugin.model.CreateResult;
 import net.dvmn2.blockanimateplugin.model.FrameResult;
 import net.dvmn2.blockanimateplugin.model.Limits;
+import net.dvmn2.blockanimateplugin.model.MoveMode;
+import net.dvmn2.blockanimateplugin.model.MoveResult;
 import net.dvmn2.blockanimateplugin.model.PlayDirection;
 import net.dvmn2.blockanimateplugin.model.PlayMode;
 import net.dvmn2.blockanimateplugin.model.PlayResult;
@@ -62,6 +65,8 @@ import java.util.function.Supplier;
  * ├── delete &lt;name&gt;
  * ├── list
  * ├── info &lt;name&gt;
+ * ├── move &lt;name&gt; &lt;dx&gt; &lt;dy&gt; &lt;dz&gt; [blocks (keep|remove)]
+ * ├── copy &lt;name&gt; &lt;new-name&gt; [&lt;position&gt;] [show &lt;index&gt;]
  * ├── frame
  * │   ├── add &lt;name&gt; [&lt;index&gt;]
  * │   ├── replace &lt;name&gt; &lt;index&gt;
@@ -73,6 +78,8 @@ import java.util.function.Supplier;
  * </pre>
  *
  * <p>Frame numbers are 1-based, delays are in seconds (fractions allowed, the minimum is one tick).
+ * Offsets of {@code move} are in blocks. {@code copy} places the minimum corner of the new region at
+ * {@code position}, or at position 1 of the player's selection when no position is given.
  */
 public final class BlockAnimateCommand {
 
@@ -81,12 +88,24 @@ public final class BlockAnimateCommand {
     private static final String ARG_POSITION = "position";
     private static final String ARG_INDEX = "index";
     private static final String ARG_DELAY = "delay";
+    private static final String ARG_DX = "dx";
+    private static final String ARG_DY = "dy";
+    private static final String ARG_DZ = "dz";
+    private static final String ARG_NEW_NAME = "new-name";
 
     /** One tick, seconds. */
     private static final double MIN_DELAY_SECONDS = 0.05;
     private static final double MAX_DELAY_SECONDS = 3_600.0;
     private static final int MAX_INDEX_SUGGESTIONS = 100;
     private static final int FIRST_FRAME_NUMBER = 1;
+    /** Largest absolute offset of {@code move}, blocks; keeps the shifted coordinates inside {@code int}. */
+    private static final int MAX_OFFSET = 60_000_000;
+    /** Marks "do not show any frame after copying". */
+    private static final int NO_FRAME = -1;
+
+    /** Where a copy is placed. */
+    private record Destination(World world, int x, int y, int z) {
+    }
 
     private final BlockAnimatePlugin plugin;
     private final AnimationManager animations;
@@ -121,6 +140,8 @@ public final class BlockAnimateCommand {
                 .then(Commands.literal("list").executes(this::list))
                 .then(Commands.literal("info")
                         .then(animationArgument().executes(this::info)))
+                .then(moveNode())
+                .then(copyNode())
                 .then(frameNode())
                 .then(playNode())
                 .then(Commands.literal("stop")
@@ -141,6 +162,41 @@ public final class BlockAnimateCommand {
                 .executes(ctx -> setPosition(ctx, number, false))
                 .then(Commands.argument(ARG_POSITION, ArgumentTypes.blockPosition())
                         .executes(ctx -> setPosition(ctx, number, true)));
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> moveNode() {
+        return Commands.literal("move")
+                .requires(has(Permissions.EDIT))
+                .then(animationArgument()
+                        .then(offsetArgument(ARG_DX)
+                                .then(offsetArgument(ARG_DY)
+                                        .then(offsetArgument(ARG_DZ)
+                                                .executes(ctx -> move(ctx, MoveMode.REGION_ONLY))
+                                                .then(Commands.literal("blocks")
+                                                        .requires(has(Permissions.PLAY))
+                                                        .then(Commands.literal("keep")
+                                                                .executes(ctx -> move(ctx, MoveMode.KEEP)))
+                                                        .then(Commands.literal("remove")
+                                                                .executes(ctx -> move(ctx, MoveMode.REMOVE))))))));
+    }
+
+    private LiteralArgumentBuilder<CommandSourceStack> copyNode() {
+        return Commands.literal("copy")
+                .requires(has(Permissions.EDIT))
+                .then(animationArgument()
+                        .then(Commands.argument(ARG_NEW_NAME, StringArgumentType.word())
+                                .executes(ctx -> copy(ctx, false, false))
+                                .then(showNode(false))
+                                .then(Commands.argument(ARG_POSITION, ArgumentTypes.blockPosition())
+                                        .executes(ctx -> copy(ctx, true, false))
+                                        .then(showNode(true)))));
+    }
+
+    /** The optional {@code show <index>} tail of {@code copy}. */
+    private LiteralArgumentBuilder<CommandSourceStack> showNode(boolean explicitPosition) {
+        return Commands.literal("show")
+                .requires(has(Permissions.PLAY))
+                .then(indexArgument(false).executes(ctx -> copy(ctx, explicitPosition, true)));
     }
 
     private LiteralArgumentBuilder<CommandSourceStack> frameNode() {
@@ -183,6 +239,10 @@ public final class BlockAnimateCommand {
 
     private RequiredArgumentBuilder<CommandSourceStack, String> animationArgument() {
         return Commands.argument(ARG_NAME, StringArgumentType.word()).suggests(this::suggestNames);
+    }
+
+    private static RequiredArgumentBuilder<CommandSourceStack, Integer> offsetArgument(String argument) {
+        return Commands.argument(argument, IntegerArgumentType.integer(-MAX_OFFSET, MAX_OFFSET));
     }
 
     private RequiredArgumentBuilder<CommandSourceStack, Integer> indexArgument(boolean allowNext) {
@@ -331,6 +391,131 @@ public final class BlockAnimateCommand {
         sender.sendMessage(Lang.get(Lang.Key.INFO_FRAMES, sender, number("count", animation.getFrameCount())));
         sender.sendMessage(Lang.get(Lang.Key.INFO_STATE, sender, stateTag(animation, sender)));
         return Command.SINGLE_SUCCESS;
+    }
+
+    // ---------- Moving and copying ----------
+
+    private int move(CommandContext<CommandSourceStack> ctx, MoveMode mode) {
+        CommandSender sender = ctx.getSource().getSender();
+        String name = nameArg(ctx);
+        int dx = IntegerArgumentType.getInteger(ctx, ARG_DX);
+        int dy = IntegerArgumentType.getInteger(ctx, ARG_DY);
+        int dz = IntegerArgumentType.getInteger(ctx, ARG_DZ);
+        MoveResult result = animations.move(name, dx, dy, dz, mode,
+                done -> reportMove(sender, name, dx, dy, dz, done));
+        reportMove(sender, name, dx, dy, dz, result);
+        return result == MoveResult.STARTED || result == MoveResult.MOVED ? Command.SINGLE_SUCCESS : 0;
+    }
+
+    /** Reports a move outcome. Called once right away and, for block moves, once more when done. */
+    private void reportMove(CommandSender sender, String name, int dx, int dy, int dz, MoveResult result) {
+        if (sender instanceof Player player && !player.isOnline()) {
+            return;
+        }
+        Lang.Key key = switch (result) {
+            case STARTED -> Lang.Key.MOVE_STARTED;
+            case MOVED -> Lang.Key.MOVE_REGION_DONE;
+            case COMPLETED -> Lang.Key.MOVE_BLOCKS_DONE;
+            case NOT_FOUND -> Lang.Key.NOT_FOUND;
+            case NO_CHANGE -> Lang.Key.MOVE_NO_CHANGE;
+            case BUSY -> Lang.Key.BUSY;
+            case WORLD_UNAVAILABLE -> Lang.Key.WORLD_UNAVAILABLE;
+            case INVALID_POSITION -> Lang.Key.REGION_OUT_OF_WORLD;
+            case OVERLAP -> Lang.Key.MOVE_OVERLAP;
+            case CHUNKS_NOT_LOADED -> Lang.Key.CHUNKS_NOT_LOADED;
+            case TOO_MANY_STATES -> Lang.Key.TOO_MANY_STATES;
+        };
+        sender.sendMessage(Lang.get(key, sender,
+                text("name", name), number("dx", dx), number("dy", dy), number("dz", dz)));
+    }
+
+    /**
+     * Copies an animation to a new place.
+     *
+     * @param explicitPosition true if the destination is the {@code position} argument, false for position 1
+     * @param show             true if the {@code index} argument names a frame to show on the copy
+     */
+    private int copy(CommandContext<CommandSourceStack> ctx, boolean explicitPosition, boolean show) {
+        CommandSender sender = ctx.getSource().getSender();
+        Player player = requirePlayer(ctx);
+        if (player == null) {
+            return 0;
+        }
+        String sourceName = nameArg(ctx);
+        String name = Animation.normalizeName(StringArgumentType.getString(ctx, ARG_NEW_NAME));
+        int frame = show ? indexArg(ctx) : NO_FRAME;
+        Animation source = animations.find(sourceName);
+        if (source == null) {
+            sender.sendMessage(Lang.get(Lang.Key.NOT_FOUND, sender, text("name", sourceName)));
+            return 0;
+        }
+        if (show && frame >= source.getFrameCount()) {
+            sender.sendMessage(playMessage(PlayResult.INVALID_INDEX, Lang.Key.SHOW_STARTED, sender, sourceName,
+                    frame + FIRST_FRAME_NUMBER));
+            return 0;
+        }
+        Destination target = explicitPosition ? explicitDestination(ctx, player) : selectionDestination(player);
+        if (target == null) {
+            return 0;
+        }
+        CopyResult result = animations.copy(sourceName, name, target.world(), target.x(), target.y(), target.z());
+        sender.sendMessage(copyMessage(result, sender, sourceName, name, source, target));
+        if (result != CopyResult.SUCCESS) {
+            return 0;
+        }
+        if (show) {
+            PlayResult shown = animations.showFrame(name, frame);
+            sender.sendMessage(playMessage(shown, Lang.Key.SHOW_STARTED, sender, name, frame + FIRST_FRAME_NUMBER));
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private Component copyMessage(CopyResult result, CommandSender sender, String sourceName, String name,
+                                  Animation source, Destination target) {
+        Lang.Key key = switch (result) {
+            case SUCCESS -> Lang.Key.COPY_SUCCESS;
+            case NOT_FOUND -> Lang.Key.NOT_FOUND;
+            case INVALID_NAME -> Lang.Key.CREATE_INVALID_NAME;
+            case EXISTS -> Lang.Key.CREATE_EXISTS;
+            case INVALID_POSITION -> Lang.Key.REGION_OUT_OF_WORLD;
+        };
+        return Lang.get(key, sender,
+                text("source", sourceName),
+                text("name", result == CopyResult.NOT_FOUND ? sourceName : name),
+                number("frames", source.getFrameCount()),
+                number("x", target.x()),
+                number("y", target.y()),
+                number("z", target.z()),
+                number("limit", Limits.MAX_NAME_LENGTH));
+    }
+
+    /** Resolves the {@code position} argument in the world of the player; reports and returns null on error. */
+    @Nullable
+    private static Destination explicitDestination(CommandContext<CommandSourceStack> ctx, Player player) {
+        try {
+            BlockPosition position = ctx.getArgument(ARG_POSITION, BlockPositionResolver.class)
+                    .resolve(ctx.getSource());
+            return new Destination(player.getWorld(), position.blockX(), position.blockY(), position.blockZ());
+        } catch (CommandSyntaxException ex) {
+            player.sendMessage(Lang.get(Lang.Key.INVALID_POSITION, player));
+            return null;
+        }
+    }
+
+    /** Uses position 1 of the player's selection; reports and returns null if it is missing. */
+    @Nullable
+    private Destination selectionDestination(Player player) {
+        Point point = selections.get(player.getUniqueId()).pos1();
+        if (point == null) {
+            player.sendMessage(Lang.get(Lang.Key.SELECTION_NO_POS1, player));
+            return null;
+        }
+        World world = plugin.getServer().getWorld(point.worldId());
+        if (world == null) {
+            player.sendMessage(Lang.get(Lang.Key.WORLD_UNAVAILABLE, player));
+            return null;
+        }
+        return new Destination(world, point.x(), point.y(), point.z());
     }
 
     // ---------- Frames ----------
@@ -557,6 +742,7 @@ public final class BlockAnimateCommand {
             case IDLE -> Lang.Key.STATE_IDLE;
             case PLAYING -> Lang.Key.STATE_PLAYING;
             case CAPTURING -> Lang.Key.STATE_CAPTURING;
+            case MOVING -> Lang.Key.STATE_MOVING;
         };
         return Placeholder.component("state", Lang.get(key, sender));
     }
