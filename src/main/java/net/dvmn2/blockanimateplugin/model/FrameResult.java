@@ -2,7 +2,8 @@ package net.dvmn2.blockanimateplugin.model;
 
 /**
  * Outcome of a frame operation. {@link #STARTED} means a capture was started and the final outcome
- * ({@link #ADDED}, {@link #REPLACED} or a failure) is delivered later.
+ * ({@link #ADDED}, {@link #REPLACED} or a failure) is delivered later. {@link #QUEUED} means the animation is
+ * busy and the operation waits in the queue; the outcome of its deferred start follows, then the final outcome.
  */
 public enum FrameResult {
     STARTED,
@@ -15,5 +16,7 @@ public enum FrameResult {
     FRAME_LIMIT,
     WORLD_UNAVAILABLE,
     CHUNKS_NOT_LOADED,
-    TOO_MANY_STATES
+    TOO_MANY_STATES,
+    QUEUED,
+    QUEUE_FULL
 }

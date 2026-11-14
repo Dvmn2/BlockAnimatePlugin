@@ -25,6 +25,20 @@ settings:
   # Default: false
   apply-physics: false
 
+  # What happens when an operation hits a busy animation or area (the animation is playing, capturing or
+  # moving, or the area overlaps a running animation or move): true or false.
+  # false: the command is refused. true: the operation waits in a queue and starts by itself, in order,
+  # when the area is free. Affects play, frame show, frame add, frame replace and move (also copy ... show).
+  # Playing in loop or pingpong mode never ends, so operations queued behind it wait until /blockanimate stop.
+  # /blockanimate stop also removes the queued operations. The queue is not saved over restarts.
+  # Default: false
+  queue-busy-operations: false
+
+  # Maximum number of operations waiting in the queue, for all animations together (1..256).
+  # A new operation is refused while the queue is full. Used only when queue-busy-operations is true.
+  # Default: 32
+  max-queued-operations: 32
+
   # How often changed animations are written to disk, in seconds (5..3600).
   # Default: 30
   autosave-seconds: 30

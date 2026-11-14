@@ -24,6 +24,7 @@ gradle wrapper       # once: the Gradle wrapper files are not included in the ar
 | `AnimationManager` | registry of animations, frame/playback/move/copy facade, dirty tracking, autosave |
 | `CaptureManager` | reads a region into a `Frame` in slices; waits for unloaded chunks |
 | `RelocationManager` | moves the blocks of a region in slices: reads them through `CaptureManager`, writes the new region, then clears the old one |
+| `OperationQueue` | optional FIFO of operations that hit a busy animation or area; one timer tick retries them in order |
 | `PlaybackManager` | owns running sessions, one timer tick advances all of them |
 | `PlaybackSession` | state machine of one playing animation (apply, wait, choose next frame) |
 | `SelectionManager` | per-player pos1/pos2 selections |
@@ -36,8 +37,8 @@ gradle wrapper       # once: the Gradle wrapper files are not included in the ar
 Threading: all Bukkit API calls and all model access are on the main thread. Disk writes run on a single-thread executor (`BlockAnimate-IO`) from immutable `AnimationSnapshot`s; a `Frame` stores block states as strings, so no Bukkit object crosses threads.
 
 Lifecycle:
-1. `onEnable`: config and language, factories, managers, `AnimationManager.load()`, listener, command registration, `AnimationManager.start()` (capture timer, playback timer, relocation timer, autosave timer).
-2. `onDisable`: cancel timers, drop sessions, captures and moves, wait for pending writes (10 s), write remaining dirty animations synchronously.
+1. `onEnable`: config and language, factories, managers, `AnimationManager.load()`, listener, command registration, `AnimationManager.start()` (capture timer, playback timer, relocation timer, queue timer, autosave timer).
+2. `onDisable`: cancel timers, drop sessions, captures, moves and queued operations, wait for pending writes (10 s), write remaining dirty animations synchronously.
 
 ## Public API
 None.
@@ -69,6 +70,10 @@ Writes are atomic (temporary file plus move). Unknown versions and corrupted fil
 - Playing from a known frame changes only blocks that differ between the two frames. The plugin tracks which frame is displayed (`Animation.displayedFrame`); manual edits to blocks that are equal in both frames are therefore not overwritten. After a restart, a failed step or a stop in the middle of a frame, the state is unknown and the next step rewrites every block.
 - Frame changes are budgeted by `settings.max-blocks-per-tick` per animation. Small diffs appear within one tick; larger ones are spread over several ticks, and the delay is counted from the end of the last tick of a frame.
 - Capturing reads `settings.max-blocks-per-tick * 4` blocks per tick.
+- With `settings.queue-busy-operations` an operation that would be refused as busy (`BUSY`, `ALREADY_RUNNING`, `OVERLAP`) is handed to `OperationQueue` and the call returns `QUEUED`. It covers `play`, `frame show`, `frame add`, `frame replace` and `move` (with or without `blocks`), and so `copy ... show`. `RUNNING_LIMIT` and every other failure stay refusals, and `frame remove`, `create`, `delete` and `copy` without `show` are never queued. `AnimationManager.submit` is the single place that decides; the attempt closures call the `try*` methods directly, so a retried operation is never queued again.
+- The queue is first-in-first-out per area: an operation also waits when an earlier waiting operation concerns the same animation or an overlapping region of the same world (for `move`: the old or the new region). Unrelated areas start independently. Each tick every waiting operation is retried, so the size is limited to `settings.max-queued-operations` (at most 256) across all animations; a full queue answers `QUEUE_FULL`.
+- Queued operations are checked again when they start, so a failure at that moment (for example a frame index that no longer exists) is reported then. The callback passed to the manager receives the deferred outcome (`STARTED`, `MOVED` or a failure) and, for captures and block moves, the final outcome afterwards. An operation of an offline player still runs, silently.
+- `stop <name>` and `delete` remove the queued operations of the animation, `stop` without a name removes all of them. A `loop` or `pingpong` playback never ends, so everything queued behind it waits for `stop`. Turning the option off with `reload` lets operations that are already queued finish and refuses new ones as before. The queue is not saved and is dropped on shutdown.
 - Chunks are never force-loaded. A step or capture waits while a chunk of the region is unloaded. A session ends if its world is unloaded.
 - Frame operations (`add`, `replace`, `remove`), `move` and `play` are rejected while an animation is playing, capturing or moving, so the frame list and the region are stable during a session.
 - A `play` or `frame show` is rejected if another running animation overlaps the region. Overlapping animations may exist while idle.

@@ -35,6 +35,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -47,6 +48,11 @@ import java.util.logging.Logger;
  *
  * <p>Moving and copying animations also go through this class: a move may rewrite blocks of the world in
  * slices (see {@link RelocationManager}), a copy only creates data and shares the immutable frames.
+ *
+ * <p>With {@code settings.queue-busy-operations} an operation that hits a busy animation or area is not
+ * refused but handed to the {@link OperationQueue}, and the method returns {@code QUEUED}. The same callback
+ * that reports a normal outcome then also receives the outcome of the deferred start. Queued operations are
+ * dropped by {@link #stop}, {@link #stopAll} and {@link #delete}.
  *
  * <p>Lifecycle: {@link #load()}, {@link #start()}, {@link #onSettingsReloaded()}, {@link #shutdown()}.
  */
@@ -68,6 +74,7 @@ public final class AnimationManager {
     private final PlaybackManager playback;
     private final CaptureManager capture;
     private final RelocationManager relocation;
+    private final OperationQueue queue;
     private final Map<String, Animation> animations = new TreeMap<>();
     private final Set<String> dirty = new HashSet<>();
     private final ExecutorService io = Executors.newSingleThreadExecutor(runnable -> {
@@ -80,7 +87,7 @@ public final class AnimationManager {
 
     public AnimationManager(Plugin plugin, Supplier<BlockAnimateSettings> settings, AnimationStore store,
                             BlockDataFactory blocks, PlaybackManager playback, CaptureManager capture,
-                            RelocationManager relocation) {
+                            RelocationManager relocation, OperationQueue queue) {
         this.plugin = plugin;
         this.log = plugin.getLogger();
         this.settings = settings;
@@ -89,6 +96,7 @@ public final class AnimationManager {
         this.playback = playback;
         this.capture = capture;
         this.relocation = relocation;
+        this.queue = queue;
     }
 
     // ---------- Lifecycle ----------
@@ -106,6 +114,7 @@ public final class AnimationManager {
         capture.start();
         playback.start();
         relocation.start();
+        queue.start();
         scheduleAutosave();
     }
 
@@ -118,6 +127,7 @@ public final class AnimationManager {
         capture.shutdown();
         playback.shutdown();
         relocation.shutdown();
+        queue.shutdown();
         io.shutdown();
         try {
             if (!io.awaitTermination(IO_SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS)) {
@@ -139,6 +149,16 @@ public final class AnimationManager {
 
     public int getCount() {
         return animations.size();
+    }
+
+    /** Returns the number of operations waiting in the queue, for all animations. */
+    public int getQueueSize() {
+        return queue.size();
+    }
+
+    /** Returns the number of queued operations of one animation. */
+    public int getQueuedCount(Animation animation) {
+        return queue.countOf(animation.getName());
     }
 
     /** Returns the sorted names of all animations. */
@@ -189,6 +209,7 @@ public final class AnimationManager {
             return false;
         }
         String name = animation.getName();
+        queue.cancel(name);
         playback.stop(name);
         capture.cancel(name);
         relocation.cancel(name);
@@ -210,43 +231,32 @@ public final class AnimationManager {
      * Captures the current state of the region as a new frame.
      *
      * @param index  0-based position to insert at, or {@link #APPEND}
-     * @param onDone called on the main thread with the final outcome if this method returns STARTED
+     * @param onDone called on the main thread with the final outcome if this method returns STARTED; if it
+     *               returns QUEUED, first with the outcome of the deferred start (STARTED or a failure)
      */
     public FrameResult addFrame(String rawName, int index, Consumer<FrameResult> onDone) {
         Animation animation = find(rawName);
         if (animation == null) {
             return FrameResult.NOT_FOUND;
         }
-        if (isBusy(animation)) {
-            return FrameResult.BUSY;
-        }
-        if (index != APPEND && (index < 0 || index > animation.getFrameCount())) {
-            return FrameResult.INVALID_INDEX;
-        }
-        if (animation.getFrameCount() >= settings.get().maxFrames()) {
-            return FrameResult.FRAME_LIMIT;
-        }
-        return startCapture(animation, false, index, onDone);
+        return submit(animation, List.of(animation.getRegion()), () -> tryAddFrame(animation, index, onDone),
+                result -> result == FrameResult.BUSY, onDone, FrameResult.QUEUED, FrameResult.QUEUE_FULL);
     }
 
     /**
      * Captures the current state of the region and stores it in place of an existing frame.
      *
      * @param index  0-based index of the frame to replace
-     * @param onDone called on the main thread with the final outcome if this method returns STARTED
+     * @param onDone called on the main thread with the final outcome if this method returns STARTED; if it
+     *               returns QUEUED, first with the outcome of the deferred start (STARTED or a failure)
      */
     public FrameResult replaceFrame(String rawName, int index, Consumer<FrameResult> onDone) {
         Animation animation = find(rawName);
         if (animation == null) {
             return FrameResult.NOT_FOUND;
         }
-        if (isBusy(animation)) {
-            return FrameResult.BUSY;
-        }
-        if (index < 0 || index >= animation.getFrameCount()) {
-            return FrameResult.INVALID_INDEX;
-        }
-        return startCapture(animation, true, index, onDone);
+        return submit(animation, List.of(animation.getRegion()), () -> tryReplaceFrame(animation, index, onDone),
+                result -> result == FrameResult.BUSY, onDone, FrameResult.QUEUED, FrameResult.QUEUE_FULL);
     }
 
     /** Removes a frame (0-based index). */
@@ -278,7 +288,8 @@ public final class AnimationManager {
      *               {@link MoveResult#MOVED}; the other modes also move the blocks of the world
      * @param air    whether air cells of the moved blocks overwrite the new place; ignored for
      *               {@link MoveMode#REGION_ONLY}
-     * @param onDone called on the main thread with the final outcome if this method returns STARTED
+     * @param onDone called on the main thread with the final outcome if this method returns STARTED; if it
+     *               returns QUEUED, first with the outcome of the deferred start (STARTED, MOVED or a failure)
      */
     public MoveResult move(String rawName, int dx, int dy, int dz, MoveMode mode, AirMode air,
                            Consumer<MoveResult> onDone) {
@@ -289,30 +300,11 @@ public final class AnimationManager {
         if (dx == 0 && dy == 0 && dz == 0) {
             return MoveResult.NO_CHANGE;
         }
-        if (isBusy(animation)) {
-            return MoveResult.BUSY;
-        }
-        World world = plugin.getServer().getWorld(animation.getWorldId());
-        if (world == null) {
-            return MoveResult.WORLD_UNAVAILABLE;
-        }
         Region from = animation.getRegion();
-        Region to = from.shifted(dx, dy, dz);
-        if (!fits(world, to)) {
-            return MoveResult.INVALID_POSITION;
-        }
-        if (mode == MoveMode.REGION_ONLY) {
-            animation.moveRegion(to);
-            markDirty(animation.getName());
-            return MoveResult.MOVED;
-        }
-        MoveResult rejected = checkMovable(world, from, to, mode);
-        if (rejected != null) {
-            return rejected;
-        }
-        boolean started = relocation.begin(animation, to, mode, air,
-                outcome -> completeMove(animation, to, onDone, outcome));
-        return started ? MoveResult.STARTED : MoveResult.BUSY;
+        return submit(animation, List.of(from, from.shifted(dx, dy, dz)),
+                () -> tryMove(animation, dx, dy, dz, mode, air, onDone),
+                result -> result == MoveResult.BUSY || result == MoveResult.OVERLAP,
+                onDone, MoveResult.QUEUED, MoveResult.QUEUE_FULL);
     }
 
     /**
@@ -347,12 +339,152 @@ public final class AnimationManager {
 
     // ---------- Playback ----------
 
-    /** Starts playback; the delay is in ticks, counted from the end of each frame change. */
-    public PlayResult play(String rawName, PlayDirection direction, PlayMode mode, int delayTicks) {
+    /**
+     * Starts playback; the delay is in ticks, counted from the end of each frame change.
+     *
+     * @param onDeferred called on the main thread with the outcome of the deferred start if this method
+     *                   returns QUEUED
+     */
+    public PlayResult play(String rawName, PlayDirection direction, PlayMode mode, int delayTicks,
+                           Consumer<PlayResult> onDeferred) {
         Animation animation = find(rawName);
         if (animation == null) {
             return PlayResult.NOT_FOUND;
         }
+        return submit(animation, List.of(animation.getRegion()),
+                () -> tryPlay(animation, direction, mode, delayTicks),
+                AnimationManager::isPlayBusy, onDeferred, PlayResult.QUEUED, PlayResult.QUEUE_FULL);
+    }
+
+    /**
+     * Shows one frame (0-based index) without animating.
+     *
+     * @param onDeferred called on the main thread with the outcome of the deferred start if this method
+     *                   returns QUEUED
+     */
+    public PlayResult showFrame(String rawName, int index, Consumer<PlayResult> onDeferred) {
+        Animation animation = find(rawName);
+        if (animation == null) {
+            return PlayResult.NOT_FOUND;
+        }
+        return submit(animation, List.of(animation.getRegion()), () -> tryShowFrame(animation, index),
+                AnimationManager::isPlayBusy, onDeferred, PlayResult.QUEUED, PlayResult.QUEUE_FULL);
+    }
+
+    /** Stops one animation and removes its queued operations. */
+    public StopResult stop(String rawName) {
+        Animation animation = find(rawName);
+        if (animation == null) {
+            return StopResult.NOT_FOUND;
+        }
+        boolean cleared = queue.cancel(animation.getName()) > 0;
+        if (playback.stop(animation.getName())) {
+            return StopResult.STOPPED;
+        }
+        return cleared ? StopResult.QUEUE_CLEARED : StopResult.NOT_RUNNING;
+    }
+
+    /** Stops every running animation and removes every queued operation; returns how many were stopped. */
+    public int stopAll() {
+        queue.cancelAll();
+        return playback.stopAll();
+    }
+
+    // ---------- Internals ----------
+
+    /**
+     * Runs an operation now, or queues it if the queue is enabled and the operation hits a busy animation
+     * or area.
+     *
+     * <p>An operation also waits when an earlier queued operation touches the same animation or area, so
+     * that it never overtakes it. {@code attempt} MUST have no effect when it reports a busy result.
+     *
+     * @param areas      every region the operation reads or writes
+     * @param isBusy     tells whether a result means "try again later"
+     * @param onDeferred receives the outcome of the deferred attempt
+     * @param queued     result to return when the operation was queued
+     * @param full       result to return when the queue is full
+     */
+    private <R> R submit(Animation animation, List<Region> areas, Supplier<R> attempt, Predicate<R> isBusy,
+                         Consumer<R> onDeferred, R queued, R full) {
+        BlockAnimateSettings current = settings.get();
+        if (!current.queueBusyOperations()) {
+            return attempt.get();
+        }
+        String name = animation.getName();
+        UUID worldId = animation.getWorldId();
+        if (!queue.hasConflict(name, worldId, areas)) {
+            R result = attempt.get();
+            if (!isBusy.test(result)) {
+                return result;
+            }
+        }
+        if (queue.size() >= current.maxQueuedOperations()) {
+            return full;
+        }
+        queue.add(name, worldId, areas, () -> {
+            R result = attempt.get();
+            if (isBusy.test(result)) {
+                return false;
+            }
+            onDeferred.accept(result);
+            return true;
+        });
+        return queued;
+    }
+
+    private FrameResult tryAddFrame(Animation animation, int index, Consumer<FrameResult> onDone) {
+        if (isBusy(animation)) {
+            return FrameResult.BUSY;
+        }
+        if (index != APPEND && (index < 0 || index > animation.getFrameCount())) {
+            return FrameResult.INVALID_INDEX;
+        }
+        if (animation.getFrameCount() >= settings.get().maxFrames()) {
+            return FrameResult.FRAME_LIMIT;
+        }
+        return startCapture(animation, false, index, onDone);
+    }
+
+    private FrameResult tryReplaceFrame(Animation animation, int index, Consumer<FrameResult> onDone) {
+        if (isBusy(animation)) {
+            return FrameResult.BUSY;
+        }
+        if (index < 0 || index >= animation.getFrameCount()) {
+            return FrameResult.INVALID_INDEX;
+        }
+        return startCapture(animation, true, index, onDone);
+    }
+
+    private MoveResult tryMove(Animation animation, int dx, int dy, int dz, MoveMode mode, AirMode air,
+                               Consumer<MoveResult> onDone) {
+        if (isBusy(animation)) {
+            return MoveResult.BUSY;
+        }
+        World world = plugin.getServer().getWorld(animation.getWorldId());
+        if (world == null) {
+            return MoveResult.WORLD_UNAVAILABLE;
+        }
+        Region from = animation.getRegion();
+        Region to = from.shifted(dx, dy, dz);
+        if (!fits(world, to)) {
+            return MoveResult.INVALID_POSITION;
+        }
+        if (mode == MoveMode.REGION_ONLY) {
+            animation.moveRegion(to);
+            markDirty(animation.getName());
+            return MoveResult.MOVED;
+        }
+        MoveResult rejected = checkMovable(world, from, to, mode);
+        if (rejected != null) {
+            return rejected;
+        }
+        boolean started = relocation.begin(animation, to, mode, air,
+                outcome -> completeMove(animation, to, onDone, outcome));
+        return started ? MoveResult.STARTED : MoveResult.BUSY;
+    }
+
+    private PlayResult tryPlay(Animation animation, PlayDirection direction, PlayMode mode, int delayTicks) {
         if (isModifying(animation)) {
             return PlayResult.BUSY;
         }
@@ -362,12 +494,7 @@ public final class AnimationManager {
         return playback.play(animation, direction, mode, delayTicks);
     }
 
-    /** Shows one frame (0-based index) without animating. */
-    public PlayResult showFrame(String rawName, int index) {
-        Animation animation = find(rawName);
-        if (animation == null) {
-            return PlayResult.NOT_FOUND;
-        }
+    private PlayResult tryShowFrame(Animation animation, int index) {
         if (isModifying(animation)) {
             return PlayResult.BUSY;
         }
@@ -377,20 +504,9 @@ public final class AnimationManager {
         return playback.showFrame(animation, index);
     }
 
-    public StopResult stop(String rawName) {
-        Animation animation = find(rawName);
-        if (animation == null) {
-            return StopResult.NOT_FOUND;
-        }
-        return playback.stop(animation.getName()) ? StopResult.STOPPED : StopResult.NOT_RUNNING;
+    private static boolean isPlayBusy(PlayResult result) {
+        return result == PlayResult.BUSY || result == PlayResult.ALREADY_RUNNING || result == PlayResult.OVERLAP;
     }
-
-    /** Stops every running animation; returns how many were stopped. */
-    public int stopAll() {
-        return playback.stopAll();
-    }
-
-    // ---------- Internals ----------
 
     private boolean isBusy(Animation animation) {
         return playback.isRunning(animation.getName()) || isModifying(animation);

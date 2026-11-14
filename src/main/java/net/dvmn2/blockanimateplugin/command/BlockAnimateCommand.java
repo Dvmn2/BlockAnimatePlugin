@@ -373,7 +373,8 @@ public final class BlockAnimateCommand {
                     text("name", animation.getName()),
                     number("frames", animation.getFrameCount()),
                     number("volume", animation.getRegion().volume()),
-                    stateTag(animation, sender)));
+                    stateTag(animation, sender),
+                    queueSuffixTag(animation, sender)));
         }
         return Command.SINGLE_SUCCESS;
     }
@@ -398,6 +399,10 @@ public final class BlockAnimateCommand {
                 number("volume", region.volume())));
         sender.sendMessage(Lang.get(Lang.Key.INFO_FRAMES, sender, number("count", animation.getFrameCount())));
         sender.sendMessage(Lang.get(Lang.Key.INFO_STATE, sender, stateTag(animation, sender)));
+        int queued = animations.getQueuedCount(animation);
+        if (queued > 0) {
+            sender.sendMessage(Lang.get(Lang.Key.INFO_QUEUED, sender, number("count", queued)));
+        }
         return Command.SINGLE_SUCCESS;
     }
 
@@ -412,7 +417,8 @@ public final class BlockAnimateCommand {
         MoveResult result = animations.move(name, dx, dy, dz, mode, air,
                 done -> reportMove(sender, name, dx, dy, dz, done));
         reportMove(sender, name, dx, dy, dz, result);
-        return result == MoveResult.STARTED || result == MoveResult.MOVED ? Command.SINGLE_SUCCESS : 0;
+        return result == MoveResult.STARTED || result == MoveResult.MOVED || result == MoveResult.QUEUED
+                ? Command.SINGLE_SUCCESS : 0;
     }
 
     /** Reports a move outcome. Called once right away and, for block moves, once more when done. */
@@ -432,9 +438,11 @@ public final class BlockAnimateCommand {
             case OVERLAP -> Lang.Key.MOVE_OVERLAP;
             case CHUNKS_NOT_LOADED -> Lang.Key.CHUNKS_NOT_LOADED;
             case TOO_MANY_STATES -> Lang.Key.TOO_MANY_STATES;
+            case QUEUED -> Lang.Key.QUEUED;
+            case QUEUE_FULL -> Lang.Key.QUEUE_FULL;
         };
         sender.sendMessage(Lang.get(key, sender,
-                text("name", name), number("dx", dx), number("dy", dy), number("dz", dz)));
+                text("name", name), number("dx", dx), number("dy", dy), number("dz", dz), queueTags()));
     }
 
     /**
@@ -458,8 +466,8 @@ public final class BlockAnimateCommand {
             return 0;
         }
         if (show && frame >= source.getFrameCount()) {
-            sender.sendMessage(playMessage(PlayResult.INVALID_INDEX, Lang.Key.SHOW_STARTED, sender, sourceName,
-                    frame + FIRST_FRAME_NUMBER));
+            reportPlay(sender, PlayResult.INVALID_INDEX, Lang.Key.SHOW_STARTED, sourceName,
+                    frame + FIRST_FRAME_NUMBER);
             return 0;
         }
         Destination target = explicitPosition ? explicitDestination(ctx, player) : selectionDestination(player);
@@ -472,8 +480,9 @@ public final class BlockAnimateCommand {
             return 0;
         }
         if (show) {
-            PlayResult shown = animations.showFrame(name, frame);
-            sender.sendMessage(playMessage(shown, Lang.Key.SHOW_STARTED, sender, name, frame + FIRST_FRAME_NUMBER));
+            PlayResult shown = animations.showFrame(name, frame,
+                    done -> reportPlay(sender, done, Lang.Key.SHOW_STARTED, name, frame + FIRST_FRAME_NUMBER));
+            reportPlay(sender, shown, Lang.Key.SHOW_STARTED, name, frame + FIRST_FRAME_NUMBER);
         }
         return Command.SINGLE_SUCCESS;
     }
@@ -560,9 +569,10 @@ public final class BlockAnimateCommand {
         CommandSender sender = ctx.getSource().getSender();
         String name = nameArg(ctx);
         int index = indexArg(ctx);
-        PlayResult result = animations.showFrame(name, index);
-        sender.sendMessage(playMessage(result, Lang.Key.SHOW_STARTED, sender, name, index + 1));
-        return result == PlayResult.STARTED ? Command.SINGLE_SUCCESS : 0;
+        PlayResult result = animations.showFrame(name, index,
+                done -> reportPlay(sender, done, Lang.Key.SHOW_STARTED, name, index + 1));
+        reportPlay(sender, result, Lang.Key.SHOW_STARTED, name, index + 1);
+        return isPlaySuccess(result) ? Command.SINGLE_SUCCESS : 0;
     }
 
     /**
@@ -583,7 +593,8 @@ public final class BlockAnimateCommand {
                 number("count", count),
                 number("min", FIRST_FRAME_NUMBER),
                 number("max", adding ? count + 1 : count),
-                number("limit", settings.get().maxFrames())
+                number("limit", settings.get().maxFrames()),
+                queueTags()
         };
         Lang.Key key = switch (result) {
             case STARTED -> Lang.Key.FRAME_CAPTURING;
@@ -597,13 +608,16 @@ public final class BlockAnimateCommand {
             case WORLD_UNAVAILABLE -> Lang.Key.WORLD_UNAVAILABLE;
             case CHUNKS_NOT_LOADED -> Lang.Key.CHUNKS_NOT_LOADED;
             case TOO_MANY_STATES -> Lang.Key.TOO_MANY_STATES;
+            case QUEUED -> Lang.Key.QUEUED;
+            case QUEUE_FULL -> Lang.Key.QUEUE_FULL;
         };
         sender.sendMessage(Lang.get(key, sender, tags));
     }
 
     private static boolean isFrameSuccess(FrameResult result) {
         return result == FrameResult.STARTED || result == FrameResult.ADDED
-                || result == FrameResult.REPLACED || result == FrameResult.REMOVED;
+                || result == FrameResult.REPLACED || result == FrameResult.REMOVED
+                || result == FrameResult.QUEUED;
     }
 
     // ---------- Playback ----------
@@ -612,12 +626,15 @@ public final class BlockAnimateCommand {
         CommandSender sender = ctx.getSource().getSender();
         String name = nameArg(ctx);
         int delayTicks = Ticks.fromSeconds(DoubleArgumentType.getDouble(ctx, ARG_DELAY));
-        PlayResult result = animations.play(name, direction, mode, delayTicks);
-        sender.sendMessage(playMessage(result, Lang.Key.PLAY_STARTED, sender, name, FIRST_FRAME_NUMBER,
+        TagResolver[] extra = {
                 text("direction", direction.getId()),
                 text("mode", mode.getId()),
-                text("delay", Ticks.toSecondsString(delayTicks))));
-        return result == PlayResult.STARTED ? Command.SINGLE_SUCCESS : 0;
+                text("delay", Ticks.toSecondsString(delayTicks))
+        };
+        PlayResult result = animations.play(name, direction, mode, delayTicks,
+                done -> reportPlay(sender, done, Lang.Key.PLAY_STARTED, name, FIRST_FRAME_NUMBER, extra));
+        reportPlay(sender, result, Lang.Key.PLAY_STARTED, name, FIRST_FRAME_NUMBER, extra);
+        return isPlaySuccess(result) ? Command.SINGLE_SUCCESS : 0;
     }
 
     private int stop(CommandContext<CommandSourceStack> ctx) {
@@ -628,20 +645,27 @@ public final class BlockAnimateCommand {
             case STOPPED -> Lang.Key.STOPPED;
             case NOT_FOUND -> Lang.Key.NOT_FOUND;
             case NOT_RUNNING -> Lang.Key.NOT_RUNNING;
+            case QUEUE_CLEARED -> Lang.Key.QUEUE_CLEARED;
         };
         sender.sendMessage(Lang.get(key, sender, text("name", name)));
-        return result == StopResult.STOPPED ? Command.SINGLE_SUCCESS : 0;
+        return result == StopResult.STOPPED || result == StopResult.QUEUE_CLEARED ? Command.SINGLE_SUCCESS : 0;
     }
 
     private int stopAll(CommandContext<CommandSourceStack> ctx) {
         CommandSender sender = ctx.getSource().getSender();
+        int queued = animations.getQueueSize();
         int stopped = animations.stopAll();
-        if (stopped == 0) {
+        if (stopped == 0 && queued == 0) {
             sender.sendMessage(Lang.get(Lang.Key.NOTHING_RUNNING, sender));
-        } else {
+            return 0;
+        }
+        if (stopped > 0) {
             sender.sendMessage(Lang.get(Lang.Key.STOPPED_ALL, sender, number("count", stopped)));
         }
-        return stopped;
+        if (queued > 0) {
+            sender.sendMessage(Lang.get(Lang.Key.QUEUE_CLEARED_ALL, sender, number("queued", queued)));
+        }
+        return stopped + queued;
     }
 
     private Component playMessage(PlayResult result, Lang.Key started, CommandSender sender, String name,
@@ -652,7 +676,8 @@ public final class BlockAnimateCommand {
                         number("index", shownIndex),
                         number("min", FIRST_FRAME_NUMBER),
                         number("max", frameCountOf(name)),
-                        number("limit", settings.get().maxRunningAnimations()))
+                        number("limit", settings.get().maxRunningAnimations()),
+                        queueTags())
                 .resolvers(extra)
                 .build();
         Lang.Key key = switch (result) {
@@ -666,8 +691,23 @@ public final class BlockAnimateCommand {
             case WORLD_UNAVAILABLE -> Lang.Key.WORLD_UNAVAILABLE;
             case RUNNING_LIMIT -> Lang.Key.PLAY_RUNNING_LIMIT;
             case OVERLAP -> Lang.Key.PLAY_OVERLAP;
+            case QUEUED -> Lang.Key.QUEUED;
+            case QUEUE_FULL -> Lang.Key.QUEUE_FULL;
         };
         return Lang.get(key, sender, tags);
+    }
+
+    /** Reports a playback outcome. Called once right away and, for queued operations, once more when decided. */
+    private void reportPlay(CommandSender sender, PlayResult result, Lang.Key started, String name, int shownIndex,
+                            TagResolver... extra) {
+        if (sender instanceof Player player && !player.isOnline()) {
+            return;
+        }
+        sender.sendMessage(playMessage(result, started, sender, name, shownIndex, extra));
+    }
+
+    private static boolean isPlaySuccess(PlayResult result) {
+        return result == PlayResult.STARTED || result == PlayResult.QUEUED;
     }
 
     private int frameCountOf(String name) {
@@ -753,6 +793,22 @@ public final class BlockAnimateCommand {
             case MOVING -> Lang.Key.STATE_MOVING;
         };
         return Placeholder.component("state", Lang.get(key, sender));
+    }
+
+    /** Empty when nothing of the animation is queued, otherwise the number of queued operations. */
+    private TagResolver queueSuffixTag(Animation animation, CommandSender sender) {
+        int queued = animations.getQueuedCount(animation);
+        Component suffix = queued == 0
+                ? Component.empty() : Lang.get(Lang.Key.LIST_QUEUED, sender, number("count", queued));
+        return Placeholder.component("queue", suffix);
+    }
+
+    /** Tags of the queue messages: operations waiting now and the configured limit. */
+    private TagResolver queueTags() {
+        return TagResolver.builder()
+                .resolver(number("queued", animations.getQueueSize()))
+                .resolver(number("queue-limit", settings.get().maxQueuedOperations()))
+                .build();
     }
 
     private static TagResolver text(String key, String value) {

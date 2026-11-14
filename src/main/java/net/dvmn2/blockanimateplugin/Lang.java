@@ -76,7 +76,13 @@ public final class Lang {
         STOPPED,
         STOPPED_ALL,
         NOT_RUNNING,
-        NOTHING_RUNNING
+        NOTHING_RUNNING,
+        LIST_QUEUED,
+        INFO_QUEUED,
+        QUEUED,
+        QUEUE_FULL,
+        QUEUE_CLEARED,
+        QUEUE_CLEARED_ALL
     }
 
     private static final MiniMessage MM = MiniMessage.miniMessage();
@@ -152,8 +158,11 @@ public final class Lang {
                 "<gold>Анимации (<count>):",
                 "<gold>Animations (<count>):");
         put(Key.LIST_ENTRY,
-                "<gray>- <yellow><name></yellow>: кадров <frames>, блоков <volume>, <state>",
-                "<gray>- <yellow><name></yellow>: <frames> frame(s), <volume> blocks, <state>");
+                "<gray>- <yellow><name></yellow>: кадров <frames>, блоков <volume>, <state><queue>",
+                "<gray>- <yellow><name></yellow>: <frames> frame(s), <volume> blocks, <state><queue>");
+        put(Key.LIST_QUEUED,
+                "<gray>, в очереди: <yellow><count></yellow>",
+                "<gray>, queued: <yellow><count></yellow>");
         put(Key.INFO_HEADER,
                 "<gold>Анимация <yellow><name></yellow>",
                 "<gold>Animation <yellow><name></yellow>");
@@ -171,6 +180,9 @@ public final class Lang {
         put(Key.INFO_STATE,
                 "<gray>Состояние: <state>",
                 "<gray>State: <state>");
+        put(Key.INFO_QUEUED,
+                "<gray>В очереди операций: <white><count>",
+                "<gray>Queued operations: <white><count>");
         put(Key.STATE_IDLE,
                 "<gray>ожидает",
                 "<gray>idle");
@@ -276,6 +288,20 @@ public final class Lang {
         put(Key.NOTHING_RUNNING,
                 "<gray>Нет воспроизводимых анимаций.",
                 "<gray>No animations are running.");
+        put(Key.QUEUED,
+                "<gray>Область занята: операция для <yellow><name></yellow> поставлена в очередь "
+                        + "(всего в очереди: <queued>).",
+                "<gray>The area is busy: the operation for <yellow><name></yellow> was queued "
+                        + "(<queued> in the queue).");
+        put(Key.QUEUE_FULL,
+                "<red>Очередь переполнена (лимит: <queue-limit>).",
+                "<red>The queue is full (limit: <queue-limit>).");
+        put(Key.QUEUE_CLEARED,
+                "<green>Анимация <yellow><name></yellow> не воспроизводится; её операции удалены из очереди.",
+                "<green>Animation <yellow><name></yellow> is not playing; its queued operations were removed.");
+        put(Key.QUEUE_CLEARED_ALL,
+                "<green>Из очереди удалено операций: <queued>.",
+                "<green>Removed queued operations: <queued>.");
         verify();
     }
 

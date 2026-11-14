@@ -28,7 +28,9 @@ public final class BlockAnimatePlugin extends JavaPlugin {
         CaptureManager capture = new CaptureManager(this, settingsSupplier);
         PlaybackManager playback = new PlaybackManager(this, settingsSupplier, blocks);
         RelocationManager relocation = new RelocationManager(this, settingsSupplier, blocks, capture);
-        animations = new AnimationManager(this, settingsSupplier, store, blocks, playback, capture, relocation);
+        OperationQueue queue = new OperationQueue(this);
+        animations = new AnimationManager(this, settingsSupplier, store, blocks, playback, capture, relocation,
+                queue);
         animations.load();
         SelectionManager selections = new SelectionManager();
         WandFactory wands = new WandFactory(keys);

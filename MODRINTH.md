@@ -9,6 +9,7 @@ Paper plugin that saves several "frames" of a block region and plays them as an 
 - Show a single frame, replace or remove frames, stop animations at any time
 - Move an animation region, with or without its blocks (the old blocks can be kept or removed)
 - Copy an animation to another place, optionally showing a frame there right away
+- Optional queue: when an animation or its area is busy, the operation waits and starts by itself instead of being refused
 - Large frames are applied over several ticks to keep the server responsive
 - Animations survive restarts; messages in Russian and English
 
@@ -50,7 +51,7 @@ Frame numbers start at 1. Delays are in seconds, fractions allowed, minimum `0.0
 | `/blockanimate frame show <name> <index>` | `blockanimate.play` | Show one frame |
 | `/blockanimate play <name> forward <delay> [once\|loop\|pingpong]` | `blockanimate.play` | Play from the first frame |
 | `/blockanimate play <name> backward <delay> [once\|loop\|pingpong]` | `blockanimate.play` | Play from the last frame |
-| `/blockanimate stop [name]` | `blockanimate.play` | Stop one animation, or all of them |
+| `/blockanimate stop [name]` | `blockanimate.play` | Stop one animation, or all of them; also removes the queued operations of the animation (or all of them) |
 | `/blockanimate reload` | `blockanimate.reload` | Reload `config.yml` |
 
 All commands also need `blockanimate.use`.
@@ -59,7 +60,7 @@ Moving and copying:
 - Offsets are in blocks (`-60000000..60000000`) and the region size never changes. `move` works in the animation's world; `copy` works in the world of the player, or of position 1 when no `position` is given. Without `position`, `copy` needs position 1 to be set.
 - `move` without `blocks` only re-points the animation: the old blocks stay in the world and the next frame change rewrites the whole new region.
 - With `blocks`, the blocks that are in the world right now (including manual edits) are copied to the new place, then, with `remove`, the old region is cleared except for the part shared with the new one. The work is spread over several ticks and a message is sent when it is done. By default (`air`) everything inside the new region is overwritten, including with air. With `skip-air`, air cells of the moved blocks are skipped and the blocks that already stand at the new place stay. If the old and the new region overlap, `skip-air` with `remove` can leave an old block where the moved blocks have air.
-- A move is refused while the animation is playing, capturing or moving, if the area overlaps a running animation or another move, if a chunk is not loaded, or if the region would leave the world.
+- Without the queue a move is refused while the animation is playing, capturing or moving, if the area overlaps a running animation or another move, if a chunk is not loaded, or if the region would leave the world.
 - If the server stops in the middle of a block move, the animation stays at the old place and the new place may be partly filled. There is no undo.
 - `copy` does not change the world unless `show` is used, and it does not copy blocks of the world, only the saved frames. Frames are shared, so a copy costs almost no extra memory.
 
@@ -86,6 +87,8 @@ File: `plugins/BlockAnimatePlugin/config.yml`
 | `settings.max-running-animations` | int | `8` | `1..64` | Animations that can play at the same time |
 | `settings.max-blocks-per-tick` | int | `4096` | `64..100000` | Blocks one animation may change per tick |
 | `settings.apply-physics` | boolean | `false` | `true`, `false` | Whether placed blocks trigger physics (gravity, fluids, redstone) |
+| `settings.queue-busy-operations` | boolean | `false` | `true`, `false` | Queue operations that hit a busy animation or area instead of refusing them |
+| `settings.max-queued-operations` | int | `32` | `1..256` | Maximum waiting operations, all animations together; used only when the queue is enabled |
 | `settings.autosave-seconds` | int | `30` | `5..3600` | How often changed animations are saved |
 
 Example for a server with big structures:
@@ -96,6 +99,14 @@ settings:
   max-volume-blocks: 250000
   max-blocks-per-tick: 8192
 ```
+
+Queue (`settings.queue-busy-operations: true`):
+- Without it a command is refused while its animation is playing, capturing or moving, or while its area overlaps a running animation or move. With it the operation is queued, the sender is told its position, and it starts by itself, in order, when the area is free.
+- Queued: `play`, `frame show`, `frame add`, `frame replace`, `move` (with or without `blocks`) and the `show` part of `copy`. Still refused: `frame remove`, and everything refused for another reason, such as the limit `settings.max-running-animations`.
+- Operations on the same animation or on overlapping areas keep their order; operations on unrelated areas start independently.
+- `loop` and `pingpong` never end, so operations queued behind them wait until `/blockanimate stop`. `stop` removes the queued operations too, `delete` removes those of the deleted animation.
+- `/blockanimate info` and `/blockanimate list` show how many operations of an animation are queued. The queue is not saved: it is lost on restart.
+- If the queue is full, new operations are refused. Turning the option off with `/blockanimate reload` lets the queued operations finish.
 
 Memory use is roughly 2 bytes per block per frame. Lowering a limit does not affect existing animations.
 
@@ -110,7 +121,9 @@ None.
 - **Chest contents or sign text are lost after playing**: only block types and states are saved, not block contents.
 - **A big frame appears piece by piece**: raise `settings.max-blocks-per-tick`, or use a smaller region.
 - **Sand or water moves after a frame change**: keep `settings.apply-physics` set to `false`.
-- **"The region overlaps with a running animation"**: stop the other animation first.
+- **"The region overlaps with a running animation"** or **"Animation is busy"**: stop the other animation first, or set `settings.queue-busy-operations` to `true` so such operations wait in a queue.
+- **"The queue is full"**: wait for queued operations to finish, use `/blockanimate stop`, or raise `settings.max-queued-operations`.
+- **A queued operation never starts**: something ahead of it never ends, usually a `loop` or `pingpong` playback; `/blockanimate stop` removes it together with the queue.
 - **A move or copy says the region would leave the world**: the new region must fit the height range of the world and be within 30,000,000 blocks in X and Z.
 - **Chest contents or sign text are lost after `move ... blocks`**: only block types and states are moved, not block contents.
 - **An animation file is skipped at start**: check the server log for the reason; the file is left untouched.

@@ -14,6 +14,8 @@ import java.util.logging.Logger;
  * @param maxRunningAnimations maximum number of simultaneously playing animations
  * @param maxBlocksPerTick    maximum number of blocks one animation changes per tick
  * @param applyPhysics        whether placed blocks trigger physics
+ * @param queueBusyOperations whether operations that hit a busy animation or area wait in a queue
+ * @param maxQueuedOperations maximum number of waiting operations
  * @param autosaveSeconds     autosave period, seconds
  */
 public record BlockAnimateSettings(
@@ -23,6 +25,8 @@ public record BlockAnimateSettings(
         int maxRunningAnimations,
         int maxBlocksPerTick,
         boolean applyPhysics,
+        boolean queueBusyOperations,
+        int maxQueuedOperations,
         int autosaveSeconds) {
 
     private static final String ROOT = "settings.";
@@ -34,6 +38,8 @@ public record BlockAnimateSettings(
     private static final int DEFAULT_MAX_BLOCKS_PER_TICK = 4_096;
     private static final int MIN_BLOCKS_PER_TICK = 64;
     private static final int MAX_BLOCKS_PER_TICK_LIMIT = 100_000;
+    private static final int DEFAULT_MAX_QUEUED = 32;
+    private static final int MAX_QUEUED_LIMIT = 256;
     private static final int DEFAULT_AUTOSAVE_SECONDS = 30;
     private static final int MIN_AUTOSAVE_SECONDS = 5;
     private static final int MAX_AUTOSAVE_SECONDS = 3_600;
@@ -47,6 +53,8 @@ public record BlockAnimateSettings(
                 readInt(config, log, "max-blocks-per-tick", DEFAULT_MAX_BLOCKS_PER_TICK,
                         MIN_BLOCKS_PER_TICK, MAX_BLOCKS_PER_TICK_LIMIT),
                 config.getBoolean(ROOT + "apply-physics", false),
+                config.getBoolean(ROOT + "queue-busy-operations", false),
+                readInt(config, log, "max-queued-operations", DEFAULT_MAX_QUEUED, 1, MAX_QUEUED_LIMIT),
                 readInt(config, log, "autosave-seconds", DEFAULT_AUTOSAVE_SECONDS,
                         MIN_AUTOSAVE_SECONDS, MAX_AUTOSAVE_SECONDS));
     }
