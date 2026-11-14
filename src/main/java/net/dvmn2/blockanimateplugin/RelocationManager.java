@@ -1,5 +1,6 @@
 package net.dvmn2.blockanimateplugin;
 
+import net.dvmn2.blockanimateplugin.model.AirMode;
 import net.dvmn2.blockanimateplugin.model.Animation;
 import net.dvmn2.blockanimateplugin.model.Frame;
 import net.dvmn2.blockanimateplugin.model.FrameResult;
@@ -30,7 +31,7 @@ import java.util.function.Supplier;
  * {@link Frame} by the {@link CaptureManager}. Then, in slices of {@code settings.max-blocks-per-tick},
  * the frame is written to the new region and, for {@link MoveMode#REMOVE}, the cells of the old region that
  * are not part of the new one are replaced with air. Writing comes before clearing so that an interrupted
- * move never loses blocks.
+ * move never loses blocks. With {@link AirMode#SKIP} the air cells of the frame are not written.
  *
  * <p>This class does not change the animation: the caller commits the new region when the callback reports
  * {@link MoveResult#COMPLETED}. A stage waits while a chunk it needs is unloaded and fails if the world
@@ -86,16 +87,18 @@ public final class RelocationManager {
      *
      * @param target the new region; it MUST have the same size as the current one and MUST NOT be a no-op
      * @param mode   {@link MoveMode#KEEP} or {@link MoveMode#REMOVE}
+     * @param air    whether air cells of the moved blocks overwrite the new place
      * @param onDone called on the main thread with {@link MoveResult#COMPLETED} or a failure; never called
      *               if cancelled
      * @return false if the animation is already being moved or captured
      */
-    public boolean begin(Animation animation, Region target, MoveMode mode, Consumer<MoveResult> onDone) {
+    public boolean begin(Animation animation, Region target, MoveMode mode, AirMode air,
+                         Consumer<MoveResult> onDone) {
         String name = animation.getName();
         if (moves.containsKey(name)) {
             return false;
         }
-        Move move = new Move(animation.getWorldId(), animation.getRegion(), target, mode, onDone);
+        Move move = new Move(animation.getWorldId(), animation.getRegion(), target, mode, air, onDone);
         moves.put(name, move);
         boolean started = capture.begin(animation, outcome -> onCaptured(name, move, outcome));
         if (!started) {
@@ -153,18 +156,22 @@ public final class RelocationManager {
         private final Region from;
         private final Region to;
         private final MoveMode mode;
+        private final AirMode air;
         private final Consumer<MoveResult> onDone;
         @Nullable
         private Frame frame;
         private BlockData[] resolved = new BlockData[0];
+        private boolean[] airStates = new boolean[0];
         private int pasteCursor;
         private int clearCursor;
 
-        private Move(UUID worldId, Region from, Region to, MoveMode mode, Consumer<MoveResult> onDone) {
+        private Move(UUID worldId, Region from, Region to, MoveMode mode, AirMode air,
+                     Consumer<MoveResult> onDone) {
             this.worldId = worldId;
             this.from = from;
             this.to = to;
             this.mode = mode;
+            this.air = air;
             this.onDone = onDone;
         }
 
@@ -176,8 +183,10 @@ public final class RelocationManager {
             frame = captured;
             List<String> palette = captured.palette();
             resolved = new BlockData[palette.size()];
+            airStates = new boolean[palette.size()];
             for (int i = 0; i < resolved.length; i++) {
                 resolved[i] = blocks.getOrAir(palette.get(i));
+                airStates[i] = resolved[i].getMaterial().isAir();
             }
         }
 
@@ -207,9 +216,12 @@ public final class RelocationManager {
         private void paste(World world, Frame source, int budget, boolean physics) {
             int end = (int) Math.min((long) pasteCursor + budget, source.cellCount());
             for (; pasteCursor < end; pasteCursor++) {
-                BlockData data = resolved[source.paletteIndexAt(pasteCursor)];
+                int state = source.paletteIndexAt(pasteCursor);
+                if (air == AirMode.SKIP && airStates[state]) {
+                    continue;
+                }
                 world.getBlockAt(to.blockX(pasteCursor), to.blockY(pasteCursor), to.blockZ(pasteCursor))
-                        .setBlockData(data, physics);
+                        .setBlockData(resolved[state], physics);
             }
         }
 

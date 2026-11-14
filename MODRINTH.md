@@ -40,8 +40,8 @@ Frame numbers start at 1. Delays are in seconds, fractions allowed, minimum `0.0
 | `/blockanimate list` | `blockanimate.use` | List animations |
 | `/blockanimate info <name>` | `blockanimate.use` | Show region, world, frame count and state |
 | `/blockanimate move <name> <dx> <dy> <dz>` | `blockanimate.edit` | Move the region by an offset in blocks; blocks in the world are not touched |
-| `/blockanimate move <name> <dx> <dy> <dz> blocks keep` | `blockanimate.edit`, `blockanimate.play` | Move the region and copy its blocks; the old blocks stay |
-| `/blockanimate move <name> <dx> <dy> <dz> blocks remove` | `blockanimate.edit`, `blockanimate.play` | Move the region and its blocks; the old blocks become air |
+| `/blockanimate move <name> <dx> <dy> <dz> blocks keep [air\|skip-air]` | `blockanimate.edit`, `blockanimate.play` | Move the region and copy its blocks; the old blocks stay |
+| `/blockanimate move <name> <dx> <dy> <dz> blocks remove [air\|skip-air]` | `blockanimate.edit`, `blockanimate.play` | Move the region and its blocks; the old blocks become air |
 | `/blockanimate copy <name> <new-name> [position]` | `blockanimate.edit` | Create a new animation with the same frames; the minimum corner of its region is placed at `position` (or at position 1) |
 | `/blockanimate copy <name> <new-name> [position] show <index>` | `blockanimate.edit`, `blockanimate.play` | Same, then show the given frame at the new place |
 | `/blockanimate frame add <name> [index]` | `blockanimate.edit` | Capture the region as a new frame (appended, or inserted at `index`) |
@@ -58,7 +58,7 @@ All commands also need `blockanimate.use`.
 Moving and copying:
 - Offsets are in blocks (`-60000000..60000000`) and the region size never changes. `move` works in the animation's world; `copy` works in the world of the player, or of position 1 when no `position` is given. Without `position`, `copy` needs position 1 to be set.
 - `move` without `blocks` only re-points the animation: the old blocks stay in the world and the next frame change rewrites the whole new region.
-- With `blocks`, the blocks that are in the world right now (including manual edits) are copied to the new place, then, with `remove`, the old region is cleared except for the part shared with the new one. The work is spread over several ticks and a message is sent when it is done. Everything inside the new region is overwritten.
+- With `blocks`, the blocks that are in the world right now (including manual edits) are copied to the new place, then, with `remove`, the old region is cleared except for the part shared with the new one. The work is spread over several ticks and a message is sent when it is done. By default (`air`) everything inside the new region is overwritten, including with air. With `skip-air`, air cells of the moved blocks are skipped and the blocks that already stand at the new place stay. If the old and the new region overlap, `skip-air` with `remove` can leave an old block where the moved blocks have air.
 - A move is refused while the animation is playing, capturing or moving, if the area overlaps a running animation or another move, if a chunk is not loaded, or if the region would leave the world.
 - If the server stops in the middle of a block move, the animation stays at the old place and the new place may be partly filled. There is no undo.
 - `copy` does not change the world unless `show` is used, and it does not copy blocks of the world, only the saved frames. Frames are shared, so a copy costs almost no extra memory.

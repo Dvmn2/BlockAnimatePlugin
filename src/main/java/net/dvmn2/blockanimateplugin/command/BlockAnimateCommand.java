@@ -23,6 +23,7 @@ import net.dvmn2.blockanimateplugin.Lang;
 import net.dvmn2.blockanimateplugin.Permissions;
 import net.dvmn2.blockanimateplugin.SelectionManager;
 import net.dvmn2.blockanimateplugin.WandFactory;
+import net.dvmn2.blockanimateplugin.model.AirMode;
 import net.dvmn2.blockanimateplugin.model.Animation;
 import net.dvmn2.blockanimateplugin.model.CopyResult;
 import net.dvmn2.blockanimateplugin.model.CreateResult;
@@ -65,7 +66,7 @@ import java.util.function.Supplier;
  * ├── delete &lt;name&gt;
  * ├── list
  * ├── info &lt;name&gt;
- * ├── move &lt;name&gt; &lt;dx&gt; &lt;dy&gt; &lt;dz&gt; [blocks (keep|remove)]
+ * ├── move &lt;name&gt; &lt;dx&gt; &lt;dy&gt; &lt;dz&gt; [blocks (keep|remove) [air|skip-air]]
  * ├── copy &lt;name&gt; &lt;new-name&gt; [&lt;position&gt;] [show &lt;index&gt;]
  * ├── frame
  * │   ├── add &lt;name&gt; [&lt;index&gt;]
@@ -78,7 +79,8 @@ import java.util.function.Supplier;
  * </pre>
  *
  * <p>Frame numbers are 1-based, delays are in seconds (fractions allowed, the minimum is one tick).
- * Offsets of {@code move} are in blocks. {@code copy} places the minimum corner of the new region at
+ * Offsets of {@code move} are in blocks; {@code air} (the default) lets air cells of the moved blocks overwrite
+ * the new place, {@code skip-air} leaves what stands there. {@code copy} places the minimum corner of the new region at
  * {@code position}, or at position 1 of the player's selection when no position is given.
  */
 public final class BlockAnimateCommand {
@@ -171,13 +173,19 @@ public final class BlockAnimateCommand {
                         .then(offsetArgument(ARG_DX)
                                 .then(offsetArgument(ARG_DY)
                                         .then(offsetArgument(ARG_DZ)
-                                                .executes(ctx -> move(ctx, MoveMode.REGION_ONLY))
+                                                .executes(ctx -> move(ctx, MoveMode.REGION_ONLY, AirMode.OVERWRITE))
                                                 .then(Commands.literal("blocks")
                                                         .requires(has(Permissions.PLAY))
-                                                        .then(Commands.literal("keep")
-                                                                .executes(ctx -> move(ctx, MoveMode.KEEP)))
-                                                        .then(Commands.literal("remove")
-                                                                .executes(ctx -> move(ctx, MoveMode.REMOVE))))))));
+                                                        .then(blocksModeNode("keep", MoveMode.KEEP))
+                                                        .then(blocksModeNode("remove", MoveMode.REMOVE)))))));
+    }
+
+    /** One of {@code keep} / {@code remove} with its optional {@code air} / {@code skip-air} tail. */
+    private LiteralArgumentBuilder<CommandSourceStack> blocksModeNode(String literal, MoveMode mode) {
+        return Commands.literal(literal)
+                .executes(ctx -> move(ctx, mode, AirMode.OVERWRITE))
+                .then(Commands.literal("air").executes(ctx -> move(ctx, mode, AirMode.OVERWRITE)))
+                .then(Commands.literal("skip-air").executes(ctx -> move(ctx, mode, AirMode.SKIP)));
     }
 
     private LiteralArgumentBuilder<CommandSourceStack> copyNode() {
@@ -395,13 +403,13 @@ public final class BlockAnimateCommand {
 
     // ---------- Moving and copying ----------
 
-    private int move(CommandContext<CommandSourceStack> ctx, MoveMode mode) {
+    private int move(CommandContext<CommandSourceStack> ctx, MoveMode mode, AirMode air) {
         CommandSender sender = ctx.getSource().getSender();
         String name = nameArg(ctx);
         int dx = IntegerArgumentType.getInteger(ctx, ARG_DX);
         int dy = IntegerArgumentType.getInteger(ctx, ARG_DY);
         int dz = IntegerArgumentType.getInteger(ctx, ARG_DZ);
-        MoveResult result = animations.move(name, dx, dy, dz, mode,
+        MoveResult result = animations.move(name, dx, dy, dz, mode, air,
                 done -> reportMove(sender, name, dx, dy, dz, done));
         reportMove(sender, name, dx, dy, dz, result);
         return result == MoveResult.STARTED || result == MoveResult.MOVED ? Command.SINGLE_SUCCESS : 0;

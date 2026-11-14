@@ -1,5 +1,6 @@
 package net.dvmn2.blockanimateplugin;
 
+import net.dvmn2.blockanimateplugin.model.AirMode;
 import net.dvmn2.blockanimateplugin.model.Animation;
 import net.dvmn2.blockanimateplugin.model.AnimationSnapshot;
 import net.dvmn2.blockanimateplugin.model.AnimationState;
@@ -275,9 +276,12 @@ public final class AnimationManager {
      *
      * @param mode   {@link MoveMode#REGION_ONLY} changes only the region and finishes immediately with
      *               {@link MoveResult#MOVED}; the other modes also move the blocks of the world
+     * @param air    whether air cells of the moved blocks overwrite the new place; ignored for
+     *               {@link MoveMode#REGION_ONLY}
      * @param onDone called on the main thread with the final outcome if this method returns STARTED
      */
-    public MoveResult move(String rawName, int dx, int dy, int dz, MoveMode mode, Consumer<MoveResult> onDone) {
+    public MoveResult move(String rawName, int dx, int dy, int dz, MoveMode mode, AirMode air,
+                           Consumer<MoveResult> onDone) {
         Animation animation = find(rawName);
         if (animation == null) {
             return MoveResult.NOT_FOUND;
@@ -306,7 +310,7 @@ public final class AnimationManager {
         if (rejected != null) {
             return rejected;
         }
-        boolean started = relocation.begin(animation, to, mode,
+        boolean started = relocation.begin(animation, to, mode, air,
                 outcome -> completeMove(animation, to, onDone, outcome));
         return started ? MoveResult.STARTED : MoveResult.BUSY;
     }
